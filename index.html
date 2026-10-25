@@ -308,6 +308,25 @@ const P = {
   inbDepPW: -15, inbDepSurv: -0.25, inbDepYW: -10
 };
 
+/* ---------- starting-flock levels (instructor settings) ---------- */
+// Each setting overrides a built-in level only when it differs from its default, so default classes keep the exact
+// same shared starting flock.
+const START_DEF = { startPWlb: 97, startYWlb: 132, startGFWlb: 10.8, startFD: 22.5, startNLB: 1.56, startSurv1: 0.93, startSurv2: 0.86, startSurv3: 0.70, startGV: 1 };
+function ncdf(z) { const t = 1 / (1 + 0.2316419 * Math.abs(z)), d = 0.3989423 * Math.exp(-z * z / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); return z > 0 ? 1 - p : p; }
+// mean litter size of mature non-carrier ewes for a threshold-model mean mu
+function litterFor(mu) { const sd = Math.sqrt(SA[5] * SA[5] + P.nlbPE * P.nlbPE + P.nlbE * P.nlbE); return 1 + [1.5, 2.5, 3.5].reduce((t, c) => t + ncdf((mu - c) / sd), 0); }
+function params(s) {
+  const v = k => { const x = s && s[k]; return x == null || x === '' || isNaN(x) || Math.abs(+x - START_DEF[k]) < 1e-9 ? null : +x; };
+  const pw = v('startPWlb'), yw = v('startYWlb'), gf = v('startGFWlb'), fd = v('startFD'), nl = v('startNLB');
+  let nlbMu = P.nlbMu;
+  if (nl != null) { let lo = -1, hi = 5; for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (litterFor(m) < Math.max(1, Math.min(3.9, nl))) lo = m; else hi = m; } nlbMu = (lo + hi) / 2; }
+  const s1 = v('startSurv1'), s2 = v('startSurv2'), s3 = v('startSurv3');
+  const surv = { 1: s1 != null ? s1 : P.surv[1], 2: s2 != null ? s2 : P.surv[2], 3: s3 != null ? s3 : P.surv[3], 4: s3 != null ? Math.max(0.2, s3 - 0.2) : P.surv[4] };
+  return { pwMean: pw != null ? pw / LB_PER_KG : P.pwMean, ywMean: yw != null ? yw / LB_PER_KG : P.ywMean, gfMean: gf != null ? gf / LB_PER_KG : P.gfMean,
+    fdMean: fd != null ? fd : P.fdMean, nlbMu, surv, gv: v('startGV') != null ? Math.max(0.2, v('startGV')) : 1 };
+}
+
 /* ---------- major genes ---------- */
 // PRNP haplotypes (codons 136/154/171): 0 = ARR, 1 = ARQ, 2 = VRQ
 const PRNP_NAMES = ['ARR', 'ARQ', 'VRQ'];
@@ -338,7 +357,7 @@ function indexSD(st) {
   const W = econWeights(st.settings), mul = st.idxMul || [1, 1, 1, 1, 1, 1];
   const b = W.map((w, t) => w * mul[t] * (t === T.NLB ? NLB_SLOPE : 1));
   let v = 0; for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) v += b[i] * b[j] * G[i][j];
-  return Math.sqrt(v);
+  return Math.sqrt(v) * params(st.settings).gv;
 }
 function indexAcc(st, x) {   // approximate accuracy of an animal's index EBV
   const W = econWeights(st.settings), mul = st.idxMul || [1, 1, 1, 1, 1, 1];
@@ -411,6 +430,7 @@ function defaultSettings() {
     woolYield: 0.52,         // clean yield (Targhee 50-55%)
     woolPrices: [[17, 6.57], [18, 6.37], [19, 5.88], [20, 5.42], [21, 5.34], [22, 5.20], [23, 5.05], [24, 4.09], [25, 3.22], [26, 2.75], [27, 2.38], [28, 2.01]], // US$/lb clean: AWEX micron guide (week ending 5 Jun 2026, US$) x 0.75 for US wool; 22 and 27 um interpolated
     eweCost: 220, matureCostPerKg: 1.2, ramCost: 250,
+    ...START_DEF,
     // major-gene frequencies: the shared starting flock, and the ram lambs offered at each year's sale
     baseARR: 0.45, baseVRQ: 0.03, baseFecB: 0.02, baseTM1: 0.25, baseTM2: 0.35, baseTM3: 0.37, baseTM4: 0.03,
     saleARR: 0.65, saleVRQ: 0.02, saleFecB: 0.05, saleTM1: 0.50, saleTM2: 0.22, saleTM3: 0.24, saleTM4: 0.04,
@@ -483,7 +503,7 @@ function econWeights(s) {
   // marginal value of an extra kg of lamb around a typical 94-lb sale weight (the slide discounts heavy lambs)
   const V = lb => lb * lambPerLb(s, lb), pk = (V(109) - V(79)) / 30 * LB_PER_KG;
   const cleanKg = fd => woolPrice(s, fd) * LB_PER_KG;
-  const fdA = P.fdMean + 1.2, gfA = P.gfMean + 0.6;   // typical adult fleece
+  const pp = params(s), fdA = pp.fdMean + 1.2, gfA = pp.gfMean + 0.6;   // typical adult fleece
   const slope = cleanKg(fdA - 0.5) - cleanKg(fdA + 0.5);
   return [
     pk * 1.0,                         // PWWT: kg of lamb sold per ewe
@@ -673,7 +693,7 @@ function computeEBV(st) {
     if (x.yfd !== null) own[4]++;
     if (x.nlb.length) own[5]++;
   }
-  const Rg = own.map((k, t) => genomicR(st, t, k));
+  const Rg = own.map((k, t) => genomicR(st, t, k)), gvE = params(st.settings).gv;
   st.genomicR = Rg;
   const lamOf = h2 => (1 - h2) / h2;
   const spec = [
@@ -695,7 +715,7 @@ function computeEBV(st) {
       const x = A[i]; const t = sp.t;
       let R = 0, yv = 0;
       if (x.ext) { const q = extPseudo(x.ext, t); if (q) { R = q.R; yv = q.yv; } }
-      else if (x.gen) { R = Rg[t]; yv = obsBV(x.a, t) + Math.sqrt((1 - R) / R) * obsSA(t) * x.ge[t]; }
+      else if (x.gen) { R = Rg[t]; yv = obsBV(x.a, t) + Math.sqrt((1 - R) / R) * obsSA(t) * gvE * x.ge[t]; }
       if (R > 0) { w[i] = sp.lam * R / (1 - R); yg[i] = yv; }
     }
     let wM = null, ygM = null;
@@ -704,7 +724,7 @@ function computeEBV(st) {
       for (let i = 0; i < n; i++) {
         const x = A[i]; let R = 0, yv = 0;
         if (x.ext) { const q = extPseudo(x.ext, 1); if (q) { R = q.R; yv = q.yv; } }
-        else if (x.gen) { R = Rg[1]; yv = x.a[1] + Math.sqrt((1 - R) / R) * SA[1] * x.ge[1]; }
+        else if (x.gen) { R = Rg[1]; yv = x.a[1] + Math.sqrt((1 - R) / R) * SA[1] * gvE * x.ge[1]; }
         if (R > 0) { wM[i] = sp.lamM * R / (1 - R); ygM[i] = yv; }
       }
     }
@@ -790,7 +810,7 @@ function newGame(opts) {
 }
 function makeFounder(st, rng, sex, by) {
   const x = newAnimal(st, {
-    sex, by, org: 'f', a: drawBV(rng, 1), pe: rng.n() * P.nlbPE, pw: rng.n() * P.gfPE, pf: rng.n() * P.fdPE,
+    sex, by, org: 'f', a: drawBV(rng, params(st.settings).gv), pe: rng.n() * P.nlbPE, pw: rng.n() * P.gfPE, pf: rng.n() * P.fdPE,
     ge: SA.map(() => rng.n()),
     prnp: [drawAllele(rng, geneFreqs(st.settings, 'base').prnp), drawAllele(rng, geneFreqs(st.settings, 'base').prnp)],
     fec: [rng.bern(geneFreqs(st.settings, 'base').fecB) ? 1 : 0, rng.bern(geneFreqs(st.settings, 'base').fecB) ? 1 : 0],
@@ -798,9 +818,10 @@ function makeFounder(st, rng, sex, by) {
     lit: rng.bern(0.35) ? 2 : 1
   });
   // historical yearling records
-  x.ywt = round1(P.ywMean + (sex === 'M' ? P.ywSexM : 0) + P.ywBirth[x.lit] + x.a[2] + rng.n() * P.ywE);
-  x.ygfw = round2(P.gfMean + (sex === 'M' ? P.gfSexM : 0) + P.gfBirth[x.lit] + x.a[3] + x.pw + rng.n() * P.gfE);
-  x.yfd = round1(P.fdMean + (sex === 'M' ? P.fdSexM : 0) + x.a[4] + x.pf + rng.n() * P.fdE);
+  const pp = params(st.settings);
+  x.ywt = round1(pp.ywMean + (sex === 'M' ? P.ywSexM : 0) + P.ywBirth[x.lit] + x.a[2] + rng.n() * P.ywE);
+  x.ygfw = round2(pp.gfMean + (sex === 'M' ? P.gfSexM : 0) + P.gfBirth[x.lit] + x.a[3] + x.pw + rng.n() * P.gfE);
+  x.yfd = round1(pp.fdMean + (sex === 'M' ? P.fdSexM : 0) + x.a[4] + x.pf + rng.n() * P.fdE);
   return x;
 }
 const round1 = v => Math.round(v * 10) / 10, round2 = v => Math.round(v * 100) / 100;
@@ -809,18 +830,18 @@ const round1 = v => Math.round(v * 10) / 10, round2 = v => Math.round(v * 100) /
 const MARKET_TREND = [0.25, 0.08, 0.15, 0.025, -0.06, 0.008];
 function makeMarket(st, y) {
   const s = st.settings, rng = makeRng(st.seed + ':market:' + y), W = econWeights(s);
-  const mi = MARKET_TREND.map(v => v * (y + 2)), gf = geneFreqs(s, 'sale');
+  const gvM = params(s).gv, mi = MARKET_TREND.map(v => v * (y + 2) * gvM), gf = geneFreqs(s, 'sale');
   const m0v = mi.map((v, t) => t === T.NLB ? v * NLB_SLOPE : v);   // across-flock mean that sale-ram EBVs regress toward
   const cands = [];
   for (let k = 0; k < 70; k++) {
-    const z = drawBV(rng, 1), a = z.map((v, t) => v + mi[t]);
+    const z = drawBV(rng, gvM), a = z.map((v, t) => v + mi[t]);
     const ag = 0, gtest = rng.bern(0.5);   // ram lambs, sold this fall and delivered as yearlings before next fall's breeding
     // ram lambs: own weaning weight, but yearling weight and fleece traits only from pedigree (and genotypes)
     const baseAcc = [0.62, 0.38, 0.50, 0.52, 0.56, 0.32];
     const acc = baseAcc.map(r => Math.min(0.92, r + (gtest ? 0.12 : 0)));
     const e = [0, 1, 2, 3, 4, 5].map(t => {
       const R = acc[t] * acc[t], m0 = m0v[t];
-      return m0 + R * (obsBV(a, t) - m0) + Math.sqrt(R * (1 - R)) * obsSA(t) * rng.n();
+      return m0 + R * (obsBV(a, t) - m0) + Math.sqrt(R * (1 - R)) * obsSA(t) * gvM * rng.n();
     });
     cands.push({
       a, e, acc, age: ag, gtest, m0: m0v.map(v => Math.round(v * 1e4) / 1e4),
@@ -1109,7 +1130,7 @@ function commitYear(st, dec) {
 
 function simulateYear(st) {
   const y = st.year, s = st.settings, A = st.animals, L = ledger(st, y);
-  const rng = makeRng(st.seed + ':year:' + y);
+  const rng = makeRng(st.seed + ':year:' + y), pp = params(s);
   const ye = { pw: rng.n() * 2.0, yw: rng.n() * 1.5, gf: rng.n() * 0.25, fd: rng.n() * 0.4, surv: rng.n() * 0.025, nlb: rng.n() * 0.06 };
   st.hist[y] = st.hist[y] || {};
   // annual maintenance for the flock carried into this year
@@ -1148,13 +1169,13 @@ function simulateYear(st) {
     else conceived = rng.bern(pConc);
     if (!conceived) { ewe.nlb.push([y, 0, acls]); continue; }
     const fb = ewe.fec[0] + ewe.fec[1];
-    const xprop = P.nlbMu + P.nlbAge(ag) + ewe.a[5] + ewe.pe + P.fecEff[fb] + ye.nlb + rng.n() * P.nlbE;
+    const xprop = pp.nlbMu + P.nlbAge(ag) + ewe.a[5] + ewe.pe + P.fecEff[fb] + ye.nlb + rng.n() * P.nlbE;
     const lit = 1 + (xprop > 1.5) + (xprop > 2.5) + (xprop > 3.5);
     ewe.nlb.push([y, lit, acls]); lambed++; born += lit;
     const c = rng.n() * P.pwC;
     const msScale = Math.sqrt(0.5 * (1 - 0.5 * (ram.F + ewe.F)));
     for (let k = 0; k < lit; k++) {
-      const ms = drawBV(rng, msScale);
+      const ms = drawBV(rng, msScale * pp.gv);
       const lamb = newAnimal(st, {
         sire: ram.id, dam: ewe.id, term: !!m.term, sex: rng.bern(0.5) ? 'M' : 'F', by: y, lit, da: ag,
         a: ewe.a.map((v, t) => 0.5 * (v + ram.a[t]) + ms[t]),
@@ -1173,10 +1194,10 @@ function simulateYear(st) {
   const termBorn = newLambs.filter(x => x.term).length;
   for (const x of newLambs) {
     const dam = A[x.dam - 1];
-    let ps = (P.surv[x.lit] || 0.4) + (x.da <= 2 ? -0.06 : 0) - (x._clin ? 0.05 : 0) + ye.surv + P.inbDepSurv * x.F + (x.term ? (s.termSurv != null ? s.termSurv : 0.04) : 0);
+    let ps = (pp.surv[x.lit] || 0.4) + (x.da <= 2 ? -0.06 : 0) - (x._clin ? 0.05 : 0) + ye.surv + P.inbDepSurv * x.F + (x.term ? (s.termSurv != null ? s.termSurv : 0.04) : 0);
     if (!rng.bern(Math.max(0.05, Math.min(0.99, ps)))) { x.out = y; x.why = 'died'; }
     else {
-      const pw = P.pwMean + (x.sex === 'M' ? P.pwSexM : 0) + P.pwBirth[x.lit] + P.pwDamAge(x.da) + x.a[0] + dam.a[1] + x._c + ye.pw
+      const pw = pp.pwMean + (x.sex === 'M' ? P.pwSexM : 0) + P.pwBirth[x.lit] + P.pwDamAge(x.da) + x.a[0] + dam.a[1] + x._c + ye.pw
         + rng.n() * P.pwE - (x._clin ? 2.5 : x._sub ? 1.0 : 0) + P.inbDepPW * x.F + (x.term ? (s.termPWlb != null ? s.termPWlb : 13) / LB_PER_KG : 0);
       x.pwwt = round1(pw); weaned++; sumPW += x.pwwt; if (x.term) termWeaned++;
     }
@@ -1188,13 +1209,13 @@ function simulateYear(st) {
     if (!inFlock(x) || x.by === y) continue;
     const ag = age(x, y), sexM = x.sex === 'M';
     const clin = oppClinical(x, y);
-    const gfw = P.gfMean + (sexM ? P.gfSexM : 0) + (ag === 1 ? (P.gfBirth[x.lit] || 0) : 0) + P.gfAge(ag) + x.a[3] + x.pw + rng.n() * P.gfE + ye.gf - (clin ? 0.3 : 0);
-    const fd = P.fdMean + (sexM ? P.fdSexM : 0) + P.fdAge(ag) + x.a[4] + x.pf + rng.n() * P.fdE + ye.fd;
+    const gfw = pp.gfMean + (sexM ? P.gfSexM : 0) + (ag === 1 ? (P.gfBirth[x.lit] || 0) : 0) + P.gfAge(ag) + x.a[3] + x.pw + rng.n() * P.gfE + ye.gf - (clin ? 0.3 : 0);
+    const fd = pp.fdMean + (sexM ? P.fdSexM : 0) + P.fdAge(ag) + x.a[4] + x.pf + rng.n() * P.fdE + ye.fd;
     x.gfw = round2(Math.max(1, gfw)); x.fd = round1(fd);
     L.wool += x.gfw * s.woolYield * woolPrice(s, x.fd) * pr.wool * LB_PER_KG; L.fleeces++; woolKg += x.gfw; fdSum += x.fd;
     if (ag === 1 && x.org === 'b') {
       x.ygfw = x.gfw; x.yfd = x.fd;
-      x.ywt = round1(P.ywMean + (sexM ? P.ywSexM : 0) + (P.ywBirth[x.lit] || 0) + x.a[2] + rng.n() * P.ywE + ye.yw + P.inbDepYW * x.F);
+      x.ywt = round1(pp.ywMean + (sexM ? P.ywSexM : 0) + (P.ywBirth[x.lit] || 0) + x.a[2] + rng.n() * P.ywE + ye.yw + P.inbDepYW * x.F);
     }
   }
   // history
@@ -1496,7 +1517,7 @@ const SIM = {
   roundOf, keyOf, exportRecs, importRecs, makeSubmission, buildBulletin, applyBulletin, currentCatalog,
   currentGroups, validate, planMatings, matingSummary, genotype, oppTest, eligibleEwes, buyRam, returnRam,
   prnpName, codon171, fecName, tmName, tmSus, tmLow, oppClinical, inFlock, age, ledger, ledgerNet,
-  TERM, geneFreqs, breedersEq, resolveSale, deliverRam, tmKnown, intensityFor, indexSD, indexAcc,
+  TERM, geneFreqs, params, litterFor, START_DEF, breedersEq, resolveSale, deliverRam, tmKnown, intensityFor, indexSD, indexAcc,
   serialize, deserialize, birthYearTrends, knownFreqs, trueFlockStats, summary, trueIndex, obsBV, indexOf,
   makeRng
 };
@@ -2626,6 +2647,12 @@ function renderInstructor() {
       <label class="inline" style="margin-top:8px"><input type="checkbox" data-act="clssync" ${s.classSync ? 'checked' : ''}> Synchronized class rounds: from round 2 on, students need your class round file to end each year</label>
       <div class="form" style="margin-top:8px">${AI_FIELDS.map(([k, l, step]) => `<label>${l}<input type="number" step="${step}" data-act="clsset" data-k="${k}" value="${s[k]}"></label>`).join('')}</div>
       <p class="small muted">Turn synchronization off for a self-paced class: students then play straight through with no AI catalog.</p></details>
+    <details ${UI.startOpen ? 'open' : ''}><summary>Starting flock: performance levels</summary>
+      <p class="small muted" style="margin-top:8px">Base levels for a single lamb from a mature ewe in an average year. Flock averages run a little lower, because of twins, young dams, OPP and year-to-year weather, and they change as students select. Ram lambs are about 8 lb heavier at 120 days, and adults shear about 1 lb more and 1–1.5 µm coarser than yearlings. These settings shape the shared starting flock, so set them before students start; they travel in the class settings file.</p>
+      <div class="form" style="margin-top:8px">${[['startPWlb', '120-day weight, ewe lambs (lb)', 1], ['startYWlb', 'Yearling weight, ewes (lb)', 1], ['startGFWlb', 'Yearling greasy fleece, ewes (lb)', 0.1], ['startFD', 'Yearling fiber diameter (µm)', 0.1],
+        ['startNLB', 'Litter size, mature ewes (lambs born per ewe lambing)', 0.01], ['startSurv1', 'Lamb survival to weaning, singles (0–1)', 0.01], ['startSurv2', 'Lamb survival, twins (0–1)', 0.01], ['startSurv3', 'Lamb survival, triplets (0–1)', 0.01],
+        ['startGV', 'Genetic variation (1 = default)', 0.05]].map(([k, l, step]) => `<label>${l}<input type="number" step="${step}" data-act="clsset" data-k="${k}" value="${s[k]}"></label>`).join('')}</div>
+      <p class="small muted">Genetic variation scales the genetic standard deviation of every trait in the starting flock, the sale rams and each new lamb crop: 1.3 means 30% more variation, so heritabilities rise and selection works faster. EBVs are still calculated with the default heritabilities. Defaults: ${Object.entries(SIM.START_DEF).map(([k, v]) => v).join(' · ')}.</p></details>
     <details ${UI.genesOpen ? 'open' : ''}><summary>Major-gene frequencies (starting flock and sale rams)</summary>
       <p class="small muted" style="margin-top:8px">Allele frequencies (0–1). PRNP: ARR and VRQ, with ARQ making up the rest. FecB: for the starting flock, the frequency of the B allele; for sale rams, the share carrying one B copy. TMEM154: haplotypes 1 and 4 are low risk, 2 and 3 susceptible; the four are rescaled to sum to 1. Starting-flock values change the shared flock, so set them before students start. Sale-ram values apply to every sale from the next one on.</p>
       ${[['base', 'Starting flock'], ['sale', 'Sale ram lambs']].map(([w, l]) => `<div class="form" style="margin-top:8px"><label><b>${l}</b></label>${[['ARR', 'PRNP ARR'], ['VRQ', 'PRNP VRQ'], ['FecB', w === 'base' ? 'FecB B allele' : 'FecB B+ carriers'], ['TM1', 'TMEM154 haplotype 1'], ['TM2', 'TMEM154 haplotype 2'], ['TM3', 'TMEM154 haplotype 3'], ['TM4', 'TMEM154 haplotype 4']].map(([k, lab]) => `<label>${lab}<input type="number" step="0.01" min="0" max="1" data-act="clsset" data-k="${w + k}" value="${s[w + k]}"></label>`).join('')}</div>`).join('')}
@@ -2899,7 +2926,8 @@ document.addEventListener('change', async e => {
     return;
   }
   if (t.dataset.act === 'clsset') { const cs = clsState().settings; cs[t.dataset.k] = +t.value; saveCls();
-    if (/^(base|sale)(ARR|VRQ|FecB|TM\d)$/.test(t.dataset.k)) { UI.genesOpen = true; render(); return; } if (t.dataset.k === 'flockSize') cs.femaleCap = Math.round(cs.flockSize * 1.25);
+    if (/^(base|sale)(ARR|VRQ|FecB|TM\d)$/.test(t.dataset.k)) { UI.genesOpen = true; render(); return; }
+    if (/^start/.test(t.dataset.k)) { UI.startOpen = true; return; } if (t.dataset.k === 'flockSize') cs.femaleCap = Math.round(cs.flockSize * 1.25);
     if (['flockSize', 'rounds', 'lambPriceSD', 'woolPriceSD', 'priceRho'].includes(t.dataset.k)) { if (t.dataset.k === 'rounds') { cs.lambIdx = null; cs.woolPath = null; } render(); }
     return; }
   if (t.dataset.act === 'clspath') {
